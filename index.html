@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>M400 · Pre-Market Signal Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: #080A0C; color: #D8D4CC; font-family: 'IBM Plex Mono', monospace; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #080A0C; }
+    ::-webkit-scrollbar-thumb { background: #2A2D36; border-radius: 2px; }
+    input::placeholder { color: #2A3040; }
+    input:focus { border-color: #C8A87C44 !important; }
+    button:hover { opacity: 0.85; }
+    button:disabled { cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    const DEFAULT_STOCKS = [
+      "NVDA","AMD","AVGO","TSM","MU","MSFT","GOOGL","META","AMZN",
+      "ORCL","PLTR","ANET","DELL","COHR","MPWR","SMCI","CEG","BE","FN","CRWV"
+    ];
+
+    // ─── Style helpers ─────────────────────────────────────────
+    const css = {
+      topbar: {
+        background:"#0C0E12", borderBottom:"1px solid #1A1D24",
+        padding:"14px 24px", display:"flex", alignItems:"center",
+        gap:"12px", position:"sticky", top:0, zIndex:99,
+      },
+      body: { padding:"24px", maxWidth:"980px", margin:"0 auto" },
+      section: {
+        background:"#0D0F13", border:"1px solid #1A1D24",
+        borderRadius:"6px", marginBottom:"16px", overflow:"hidden",
+      },
+      sHead: {
+        background:"#111318", padding:"10px 18px", fontSize:"9px",
+        letterSpacing:"0.2em", color:"#4A5568",
+        borderBottom:"1px solid #1A1D24", display:"flex",
+        alignItems:"center", gap:"8px",
+      },
+      sBody: { padding:"18px" },
+      label: {
+        fontSize:"9px", color:"#4A5568",
+        letterSpacing:"0.15em", display:"block", marginBottom:"6px",
+      },
+      input: {
+        background:"#080A0C", border:"1px solid #1A1D24",
+        borderRadius:"4px", color:"#D8D4CC", fontSize:"12px",
+        padding:"9px 12px", width:"100%", fontFamily:"inherit", outline:"none",
+      },
+      hint: { fontSize:"9px", color:"#2A3040", marginTop:"7px" },
+    };
+
+    function btn(variant = "primary") {
+      return {
+        padding: variant === "primary" ? "10px 22px" : "9px 18px",
+        borderRadius:"4px",
+        border: variant === "primary" ? "none" : "1px solid #1A1D24",
+        background: variant === "primary" ? "#C8A87C" : "#111318",
+        color: variant === "primary" ? "#080A0C" : "#7A8090",
+        fontSize:"11px", fontWeight:700, fontFamily:"inherit",
+        letterSpacing:"0.08em", cursor:"pointer", transition:"all 0.15s",
+      };
+    }
+
+    function tag(active) {
+      return {
+        display:"inline-flex", alignItems:"center",
+        padding:"3px 8px", borderRadius:"3px",
+        border:`1px solid ${active ? "#C8A87C44" : "#1A1D24"}`,
+        background: active ? "#1A1610" : "transparent",
+        color: active ? "#C8A87C" : "#4A5568",
+        fontSize:"10px", cursor:"pointer", transition:"all 0.12s",
+        margin:"3px", fontFamily:"inherit",
+      };
+    }
+
+    // ─── Main App ───────────────────────────────────────────────
+    function App() {
+      const [apiKey,     setApiKey]     = useState(() => localStorage.getItem("m400_apikey") || "");
+      const [webhook,    setWebhook]    = useState(() => localStorage.getItem("m400_webhook") || "");
+      const [watchlist,  setWatchlist]  = useState([...DEFAULT_STOCKS]);
+      const [newTicker,  setNewTicker]  = useState("");
+      const [floor,      setFloor]      = useState("90");
+      const [status,     setStatus]     = useState("idle");
+      const [log,        setLog]        = useState([]);
+      const [preview,    setPreview]    = useState(null);
+      const logRef = useRef(null);
+
+      // 儲存到 localStorage
+      useEffect(() => { localStorage.setItem("m400_apikey", apiKey); }, [apiKey]);
+      useEffect(() => { localStorage.setItem("m400_webhook", webhook); }, [webhook]);
+
+      const addLog = (msg, type = "info") => {
+        setLog(prev => [...prev, { msg, type, ts: new Date().toLocaleTimeString("zh-TW") }]);
+        setTimeout(() => { if(logRef.current) logRef.current.scrollTop = 99999; }, 50);
+      };
+
+      const addTicker = () => {
+        const t = newTicker.trim().toUpperCase();
+        if (t && !watchlist.includes(t)) setWatchlist(p => [...p, t]);
+        setNewTicker("");
+      };
+
+      const removeTicker = t => setWatchlist(p => p.filter(x => x !== t));
+
+      // ── Prompt builder ────────────────────────────────────────
+      function buildPrompt() {
+        const date = new Date().toLocaleDateString("zh-TW", { year:"numeric", month:"2-digit", day:"2-digit" });
+        return `你是一個專業的美股 AI 產業鏈分析師，專注於 pre-market 交易信號。
+
+今天日期：${date}
+監控股票池：${watchlist.join(", ")}
+可信度門檻：${floor}%
+
+任務：
+1. 使用 web search 搜尋以上股票在過去 24 小時內的重要新聞、財報、分析師報告、異常量能、法人動態
+2. 僅保留可信度 ≥ ${floor}% 的信號
+3. 可信度評分標準：Bloomberg/Reuters/WSJ/CNBC/官方新聞稿/SEC 文件 = 高分；至少兩個獨立來源確認 +10%；社群媒體 -30%
+4. 大道至簡：寧可空白也不推低品質噪音
+
+輸出格式（嚴格 JSON，不加任何 markdown 或說明）：
+{
+  "date": "${date}",
+  "market_open": "21:30 台灣時間",
+  "signals": [
+    {
+      "direction": "BULL",
+      "ticker": "NVDA",
+      "headline": "核心事實一句話（中文，≤30字）",
+      "detail": "補充說明（中文，≤60字）",
+      "credibility": 95,
+      "source": "Bloomberg",
+      "impact": "HIGH"
+    }
+  ],
+  "macro_note": "今日總體環境一句話（中文，≤40字）",
+  "no_signal_reason": "若 signals 為空則填寫原因"
+}
+
+只輸出 JSON，不要其他文字。`;
+      }
+
+      // ── Generate ──────────────────────────────────────────────
+      async function generate() {
+        if (!apiKey) { alert("請先填入 Anthropic API Key"); return; }
+        setStatus("generating");
+        setLog([]);
+        setPreview(null);
+        addLog("⚡ 初始化 AI 分析引擎...", "info");
+        addLog(`📋 監控股票池：${watchlist.length} 支  可信度門檻：${floor}%`, "info");
+
+        try {
+          addLog("🔍 啟動 Web Search，掃描過去 24H 新聞...", "info");
+
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": apiKey,
+              "anthropic-version": "2023-06-01",
+              "anthropic-dangerous-direct-browser-access": "true",
+            },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              tools: [{ type: "web_search_20250305", name: "web_search" }],
+              messages: [{ role: "user", content: buildPrompt() }],
+            }),
+          });
+
+          const data = await res.json();
+          if (data.error) throw new Error(data.error.message);
+
+          const searchCount = (data.content || []).filter(b => b.type === "tool_use").length;
+          if (searchCount > 0) addLog(`✅ 完成 ${searchCount} 次網路搜尋`, "success");
+
+          addLog("🧠 AI 分析信號可信度...", "info");
+
+          const text = (data.content || [])
+            .filter(b => b.type === "text")
+            .map(b => b.text)
+            .join("")
+            .replace(/```json|```/g, "")
+            .trim();
+
+          let report;
+          try {
+            report = JSON.parse(text);
+          } catch {
+            const m = text.match(/\{[\s\S]*\}/);
+            if (!m) throw new Error("無法解析 AI 回應，請重試");
+            report = JSON.parse(m[0]);
+          }
+
+          const f = parseInt(floor);
+          report.signals = (report.signals || []).filter(s => (s.credibility || 0) >= f);
+
+          addLog(`📊 發現 ${report.signals.length} 個高可信度信號`, "success");
+          setPreview(buildDiscordPayload(report));
+          addLog("✅ 報告生成完成，可預覽後發送", "success");
+          setStatus("ready");
+
+        } catch(err) {
+          addLog(`❌ 錯誤：${err.message}`, "error");
+          setStatus("error");
+        }
+      }
+
+      // ── Build Discord payload ─────────────────────────────────
+      function buildDiscordPayload(report) {
+        const DIR = {
+          BULL:  { emoji:"🟢", label:"看漲", color: 0x8AB4A0 },
+          BEAR:  { emoji:"🔴", label:"看跌", color: 0xC86060 },
+          WATCH: { emoji:"🟡", label:"注意", color: 0xE8D080 },
+        };
+
+        const signals = report.signals || [];
+        const highCount = signals.filter(s => s.impact === "HIGH").length;
+        const now = new Date().toLocaleTimeString("zh-TW", { hour:"2-digit", minute:"2-digit" });
+
+        const embeds = [{
+          color: 0xC8A87C,
+          author: { name: "M400 · AI 產業鏈美股情報" },
+          title: `📡  ${report.date || "—"}  Pre-Market Signal Report`,
+          description: [
+            `> **總體環境：** ${report.macro_note || "—"}`,
+            "",
+            `\`生成時間 ${now}\`  \`信號數量 ${signals.length}\`  \`高影響 ${highCount}\`  \`可信度門檻 ${floor}%+\``,
+          ].join("\n"),
+          footer: { text: "Powered by Claude + Web Search · M400 Signal Bot" },
+          timestamp: new Date().toISOString(),
+        }];
+
+        if (signals.length === 0) {
+          embeds.push({
+            color: 0x4A5568,
+            title: "⚪ 今日無高可信度信號",
+            description: report.no_signal_reason
+              ? `原因：${report.no_signal_reason}\n\n保持觀望，等待更清晰的信號。`
+              : "今日未發現達到可信度門檻的交易信號。保持觀望。",
+          });
+        } else {
+          signals.forEach(s => {
+            const d = DIR[s.direction] || { emoji:"⚪", label:s.direction, color:0x4A5568 };
+            embeds.push({
+              color: d.color,
+              title: `$${s.ticker}`,
+              description: [
+                `${d.emoji} **${d.label}**   可信度 \`${s.credibility}%\`   ${s.impact === "HIGH" ? "🔥 **HIGH IMPACT**" : ""}`,
+                "",
+                `**${s.headline}**`,
+                s.detail ? `\n${s.detail}` : "",
+                s.price_context ? `\n📍 ${s.price_context}` : "",
+                "",
+                `\`來源：${s.source}\``,
+              ].filter(Boolean).join("\n"),
+            });
+          });
+        }
+
+        return { username: "M400 Signal Bot", embeds };
+      }
+
+      // ── Send to Discord ───────────────────────────────────────
+      async function sendToDiscord() {
+        if (!webhook || !preview) return;
+        setStatus("sending");
+        addLog("📤 發送至 Discord...", "info");
+
+        try {
+          const res = await fetch(webhook, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(preview),
+          });
+          if (res.ok) {
+            addLog("✅ 成功發送至 Discord！", "success");
+            setStatus("done");
+          } else {
+            throw new Error(`HTTP ${res.status}`);
+          }
+        } catch(err) {
+          addLog(`❌ Discord 發送失敗：${err.message}`, "error");
+          setStatus("error");
+        }
+      }
+
+      const isGenerating = status === "generating";
+      const isReady = status === "ready" || status === "done";
+
+      return (
+        <div style={{ minHeight:"100vh", background:"#080A0C", color:"#D8D4CC", fontFamily:"'IBM Plex Mono', monospace" }}>
+
+          {/* Topbar */}
+          <div style={css.topbar}>
+            <div style={{ width:8, height:8, borderRadius:"50%", background:"#C8A87C" }} />
+            <div style={{ width:8, height:8, borderRadius:"50%", background:"#4A5568" }} />
+            <div style={{ width:8, height:8, borderRadius:"50%", background:"#4A5568" }} />
+            <span style={{ fontSize:"13px", fontWeight:700, color:"#C8A87C", letterSpacing:"0.12em" }}>
+              M400 · PRE-MARKET SIGNAL BOT
+            </span>
+            <span style={{ fontSize:"9px", color:"#3A4050", letterSpacing:"0.2em", marginLeft:"auto" }}>
+              AI 產業鏈美股情報 → Discord
+            </span>
+          </div>
+
+          <div style={css.body}>
+
+            {/* ── Config Row ── */}
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"16px" }}>
+
+              {/* API Key */}
+              <div style={css.section}>
+                <div style={css.sHead}>⚙ ANTHROPIC API KEY</div>
+                <div style={css.sBody}>
+                  <label style={css.label}>API KEY（儲存於本機，不會上傳）</label>
+                  <input
+                    style={css.input}
+                    type="password"
+                    placeholder="sk-ant-api03-..."
+                    value={apiKey}
+                    onChange={e => setApiKey(e.target.value)}
+                  />
+                  <div style={css.hint}>
+                    取得：console.anthropic.com → API Keys → Create Key
+                  </div>
+                </div>
+              </div>
+
+              {/* Webhook */}
+              <div style={css.section}>
+                <div style={css.sHead}>⚙ DISCORD WEBHOOK</div>
+                <div style={css.sBody}>
+                  <label style={css.label}>WEBHOOK URL</label>
+                  <input
+                    style={css.input}
+                    type="password"
+                    placeholder="https://discord.com/api/webhooks/..."
+                    value={webhook}
+                    onChange={e => setWebhook(e.target.value)}
+                  />
+                  <div style={css.hint}>
+                    頻道設定 → 整合 → Webhook → 複製連結
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* ── Status bar ── */}
+            <div style={{ ...css.section, marginBottom:"16px" }}>
+              <div style={{ ...css.sBody, display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:"10px" }}>
+                {[
+                  { label:"監控股票",    val: watchlist.length },
+                  { label:"可信度門檻",  val: `${floor}%+` },
+                  { label:"API Key",     val: apiKey ? "✓ 已設定" : "— 未設定" },
+                  { label:"Discord",     val: webhook ? "✓ 已設定" : "— 未設定" },
+                ].map(s => (
+                  <div key={s.label} style={{ background:"#080A0C", borderRadius:"4px", padding:"10px 12px" }}>
+                    <div style={{ fontSize:"9px", color:"#3A4050", marginBottom:"4px", letterSpacing:"0.1em" }}>{s.label}</div>
+                    <div style={{ fontSize:"15px", color:"#C8A87C", fontWeight:700 }}>{s.val}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Watchlist ── */}
+            <div style={css.section}>
+              <div style={{ ...css.sHead, justifyContent:"space-between" }}>
+                <span>◎ 監控股票池　WATCHLIST</span>
+                <div style={{ display:"flex", alignItems:"center", gap:"8px" }}>
+                  <span style={{ fontSize:"9px", color:"#3A4050" }}>可信度門檻</span>
+                  <select
+                    value={floor}
+                    onChange={e => setFloor(e.target.value)}
+                    style={{ background:"#080A0C", border:"1px solid #1A1D24", color:"#C8A87C", fontSize:"10px", padding:"3px 6px", fontFamily:"inherit", borderRadius:"3px" }}
+                  >
+                    {["85","90","92","95"].map(v => (
+                      <option key={v} value={v}>{v}%</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div style={css.sBody}>
+                <div style={{ marginBottom:"12px" }}>
+                  {watchlist.map(t => (
+                    <button key={t} style={tag(true)} onClick={() => removeTicker(t)}>
+                      {t} <span style={{ marginLeft:"4px", opacity:0.5 }}>×</span>
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display:"flex", gap:"8px" }}>
+                  <input
+                    style={{ ...css.input, width:"140px" }}
+                    placeholder="新增 e.g. TSLA"
+                    value={newTicker}
+                    onChange={e => setNewTicker(e.target.value.toUpperCase())}
+                    onKeyDown={e => e.key === "Enter" && addTicker()}
+                  />
+                  <button style={btn("secondary")} onClick={addTicker}>新增</button>
+                </div>
+              </div>
+            </div>
+
+            {/* ── Actions ── */}
+            <div style={{ display:"flex", gap:"12px", marginBottom:"16px", alignItems:"center", flexWrap:"wrap" }}>
+              <button
+                style={{ ...btn("primary"), opacity: isGenerating ? 0.6 : 1, minWidth:"160px" }}
+                onClick={generate}
+                disabled={isGenerating}
+              >
+                {isGenerating ? "⏳ 分析中..." : "⚡ 生成今日報告"}
+              </button>
+              <button
+                style={{ ...btn("secondary"), opacity: (!isReady || !webhook) ? 0.4 : 1 }}
+                onClick={sendToDiscord}
+                disabled={!isReady || !webhook || status === "sending"}
+              >
+                {status === "sending" ? "📤 發送中..." : "📤 發送至 Discord"}
+              </button>
+              {status === "done" && (
+                <span style={{ fontSize:"11px", color:"#8AB4A0" }}>✅ 已成功發送</span>
+              )}
+              {(!apiKey || !webhook) && status === "idle" && (
+                <span style={{ fontSize:"10px", color:"#4A5568" }}>← 請先填入 API Key 和 Webhook URL</span>
+              )}
+            </div>
+
+            {/* ── Log ── */}
+            {log.length > 0 && (
+              <div style={css.section}>
+                <div style={css.sHead}>▸ EXECUTION LOG</div>
+                <div ref={logRef} style={{ ...css.sBody, maxHeight:"140px", overflowY:"auto", padding:"12px 18px" }}>
+                  {log.map((l, i) => (
+                    <div key={i} style={{
+                      fontSize:"10.5px",
+                      color: l.type === "error" ? "#C86060" : l.type === "success" ? "#8AB4A0" : "#5A6070",
+                      marginBottom:"3px", display:"flex", gap:"10px",
+                    }}>
+                      <span style={{ color:"#2A3040", flexShrink:0 }}>{l.ts}</span>
+                      <span>{l.msg}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── Discord Preview ── */}
+            {preview && (
+              <div style={css.section}>
+                <div style={css.sHead}>👁 DISCORD 預覽</div>
+                <div style={css.sBody}>
+                  <div style={{ background:"#36393F", borderRadius:"8px", overflow:"hidden", fontFamily:"sans-serif" }}>
+                    <div style={{ background:"#2F3136", padding:"8px 14px", fontSize:"11px", color:"#72767D", borderBottom:"1px solid #202225", display:"flex", alignItems:"center", gap:"6px" }}>
+                      <span style={{ width:8, height:8, borderRadius:"50%", background:"#43B581", display:"inline-block" }} />
+                      M400 Signal Bot
+                      <span style={{ marginLeft:"auto" }}>今天</span>
+                    </div>
+                    <div style={{ padding:"12px 14px", background:"#36393F" }}>
+                      {(preview.embeds || []).map((embed, i) => (
+                        <div key={i} style={{
+                          borderLeft:`4px solid #${(embed.color||0x4A5568).toString(16).padStart(6,"0")}`,
+                          background:"#2F3136", borderRadius:"0 4px 4px 0",
+                          padding:"12px 14px", marginBottom:"8px",
+                        }}>
+                          {embed.author && <div style={{ fontSize:"11px", color:"#72767D", marginBottom:"5px" }}>{embed.author.name}</div>}
+                          {embed.title && <div style={{ fontSize:"14px", fontWeight:700, color:"#fff", marginBottom:"6px" }}>{embed.title}</div>}
+                          {embed.description && (
+                            <div style={{ fontSize:"13px", color:"#DCDDDE", lineHeight:1.55, whiteSpace:"pre-wrap" }}>
+                              {embed.description.replace(/\*\*(.*?)\*\*/g,"$1").replace(/`(.*?)`/g,"$1").replace(/> (.*)/g,"  $1")}
+                            </div>
+                          )}
+                          {embed.footer && (
+                            <div style={{ fontSize:"11px", color:"#72767D", marginTop:"10px", borderTop:"1px solid #40444B", paddingTop:"8px" }}>
+                              {embed.footer.text}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
